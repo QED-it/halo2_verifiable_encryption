@@ -1,7 +1,7 @@
-use crate::encode::utf8::convert_u8_array_to_u64_array;
 /// Defined in [Verifiable Encryption using Halo2][Section 2.3. Encode a Message into a Point].
 /// encode allows to encode a Fp message to an ECC point
 /// decode to decode an ECC point to a Fp message
+use crate::encode::utf8::convert_u8_array_to_u64_array;
 use ff::Field;
 use group::prime::PrimeCurveAffine;
 use group::Curve;

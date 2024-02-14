@@ -1,16 +1,3 @@
-use crate::add_sub_mul::add_sub_mul::{
-    AddInstructions, AddSubMulChip, AddSubMulConfig, AddSubMulInstructions, MulInstructions,
-    SubInstructions,
-};
-use crate::constants::fixed_bases::VerifiableEncryptionFixedBases;
-use crate::constants::sinsemilla::{
-    VerifiableEncryptionCommitDomain, VerifiableEncryptionHashDomain,
-};
-use crate::elgamal::extended_elgamal::DataInTransmit;
-use ff::Field;
-use group::prime::PrimeCurveAffine;
-use group::Curve;
-use halo2_gadgets::ecc::chip::{EccChip, EccConfig};
 /// Defined in [Verifiable Encryption using Halo2][Section 3.2. Task 1 - Verifiable Encryption without relation R].
 /// Format a circuit and an instance for Encode and Elgamal encryption
 /// A round trip test to prove ciphertext(s) are encryption(s) of message block(s)
@@ -33,7 +20,20 @@ use halo2_gadgets::ecc::chip::{EccChip, EccConfig};
 /// - public group element `elgamal_public_key`
 /// - public generator `G`;
 
-///
+
+use crate::add_sub_mul::add_sub_mul::{
+    AddInstructions, AddSubMulChip, AddSubMulConfig, AddSubMulInstructions, MulInstructions,
+    SubInstructions,
+};
+use crate::constants::fixed_bases::VerifiableEncryptionFixedBases;
+use crate::constants::sinsemilla::{
+    VerifiableEncryptionCommitDomain, VerifiableEncryptionHashDomain,
+};
+use crate::elgamal::extended_elgamal::DataInTransmit;
+use ff::Field;
+use group::prime::PrimeCurveAffine;
+use group::Curve;
+use halo2_gadgets::ecc::chip::{EccChip, EccConfig};
 use halo2_gadgets::ecc::{NonIdentityPoint, ScalarVar};
 use halo2_gadgets::sinsemilla::chip::{SinsemillaChip, SinsemillaConfig};
 use halo2_gadgets::utilities::lookup_range_check::LookupRangeCheckConfig;
@@ -180,7 +180,68 @@ impl Circuit<pallas::Base> for MyCircuit {
 
         let column = ecc_chip.config().advices[0];
 
-        // (1) ct_1 = [r_enc]generator
+        // (1) Encode(m; r_encode) = p_m, that is,
+        // (1.1) p_m.x = r_encode + m
+
+        // witness message point p_m
+        let p_m = NonIdentityPoint::new(
+            ecc_chip.clone(),
+            layouter.namespace(|| "load p_m"),
+            self.p_m.as_ref().map(|p_m| p_m.to_affine()),
+        )?;
+        // load randomness r_encode
+        let r_encode = add_sub_mul_chip.load_private(
+            layouter.namespace(|| "load r_encode"),
+            Value::known(self.ct.r_encode),
+        )?;
+
+        // load dsa_private_key = message
+        let message =
+            add_sub_mul_chip.load_private(layouter.namespace(|| "load message"), self.m)?;
+
+        // compute res = m + r_encode - p_m.x
+        let exp_m = add_sub_mul_chip.add(
+            layouter.namespace(|| "m + r_encode"),
+            message.clone(),
+            r_encode,
+        )?;
+        let res = add_sub_mul_chip.sub(
+            layouter.namespace(|| "m + r_encode - p_m.x"),
+            exp_m,
+            p_m.inner().x(),
+        )?;
+
+        // check if res = 0
+        add_sub_mul_chip.check_result(layouter.namespace(|| "check res"), res, 0)?;
+
+        // (1.2) p_m.x^3 + 5 = p_m.y^2
+        let x2 = add_sub_mul_chip.mul(
+            layouter.namespace(|| "x*x"),
+            p_m.inner().x().clone(),
+            p_m.inner().x().clone(),
+        )?;
+        let x3 =
+            add_sub_mul_chip.mul(layouter.namespace(|| "x*x*x"), p_m.inner().x().clone(), x2)?;
+
+        let five = add_sub_mul_chip
+            .load_constant(layouter.namespace(|| "load 5"), pallas::Base::from(5))?;
+
+        let left = add_sub_mul_chip.add(layouter.namespace(|| "x*x*x + 5"), x3, five)?;
+
+        let right = add_sub_mul_chip.mul(
+            layouter.namespace(|| "y*y"),
+            p_m.inner().y().clone(),
+            p_m.inner().y().clone(),
+        )?;
+
+        let res = add_sub_mul_chip.sub(layouter.namespace(|| "x*x*x + 5 - y*y"), left, right)?;
+
+        // check if x*x*x + 5 - y*y = 0
+        add_sub_mul_chip.check_result(layouter.namespace(|| "check res"), res, 0)?;
+
+
+        // (2) C = ElGamal.Enc(pk, p_m)
+        // (2.1) ct_1 = [r_enc]generator
         // r_enc
         let assigned_r_enc =
             ecc_chip.load_private(layouter.namespace(|| "load r_enc"), column, self.r_enc)?;
@@ -213,14 +274,8 @@ impl Circuit<pallas::Base> for MyCircuit {
             ELGAMAL_CT1_Y,
         )?;
 
-        // (2) ct_2 = p_m +[r_enc]pk
-        // witness message point p_m
-        let p_m = NonIdentityPoint::new(
-            ecc_chip.clone(),
-            layouter.namespace(|| "load p_m"),
-            self.p_m.as_ref().map(|p_m| p_m.to_affine()),
-        )?;
-
+        // (2.2) ct_2 = p_m +[r_enc]pk
+        
         // r_enc
         let r_enc = ScalarVar::from_base(
             ecc_chip.clone(),
@@ -267,57 +322,6 @@ impl Circuit<pallas::Base> for MyCircuit {
             ELGAMAL_CT2_Y,
         )?;
 
-        // (3) Encode(m; r_encode) = p_m, that is,
-        // (3.1) pm.x = m + r_encode
-        // load randomness r_encode
-        let r_encode = add_sub_mul_chip.load_private(
-            layouter.namespace(|| "load r_encode"),
-            Value::known(self.ct.r_encode),
-        )?;
-
-        // load dsa_private_key = message
-        let message =
-            add_sub_mul_chip.load_private(layouter.namespace(|| "load message"), self.m)?;
-
-        // compute res = m + r_encode - p_m.x
-        let exp_m = add_sub_mul_chip.add(
-            layouter.namespace(|| "m + r_encode"),
-            message.clone(),
-            r_encode,
-        )?;
-        let res = add_sub_mul_chip.sub(
-            layouter.namespace(|| "m + r_encode - p_m.x"),
-            exp_m,
-            p_m.inner().x(),
-        )?;
-
-        // check if res = 0
-        add_sub_mul_chip.check_result(layouter.namespace(|| "check res"), res, 0)?;
-
-        // (3.2) p_m.x^3 + 5 = p_m.y^2
-        let x2 = add_sub_mul_chip.mul(
-            layouter.namespace(|| "x*x"),
-            p_m.inner().x().clone(),
-            p_m.inner().x().clone(),
-        )?;
-        let x3 =
-            add_sub_mul_chip.mul(layouter.namespace(|| "x*x*x"), p_m.inner().x().clone(), x2)?;
-
-        let five = add_sub_mul_chip
-            .load_constant(layouter.namespace(|| "load 5"), pallas::Base::from(5))?;
-
-        let left = add_sub_mul_chip.add(layouter.namespace(|| "x*x*x + 5"), x3, five)?;
-
-        let right = add_sub_mul_chip.mul(
-            layouter.namespace(|| "y*y"),
-            p_m.inner().y().clone(),
-            p_m.inner().y().clone(),
-        )?;
-
-        let res = add_sub_mul_chip.sub(layouter.namespace(|| "x*x*x + 5 - y*y"), left, right)?;
-
-        // check if x*x*x + 5 - y*y = 0
-        add_sub_mul_chip.check_result(layouter.namespace(|| "check res"), res, 0)?;
 
         Ok(())
     }
@@ -468,7 +472,8 @@ mod tests {
             let circuit_cost =
                 halo2_proofs::dev::CircuitCost::<vesta::Point, _>::measure(K, &circuit[0]);
             let expected_proof_size = usize::from(circuit_cost.proof_size(instance.len()));
-            println!("Proof length: {}B", proof.len());
+            println!("Proof length: {}B", expected_proof_size);
+
             assert_eq!(proof.len(), expected_proof_size);
         }
     }

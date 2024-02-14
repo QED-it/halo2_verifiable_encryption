@@ -1,8 +1,9 @@
+/// Defined in [Verifiable Encryption using Halo2][Section 2.4. Real Application Process].
+
 use crate::elgamal::elgamal::{
     elgamal_decrypt, elgamal_encrypt, ElGamalCiphertext, ElGamalKeypair,
 };
 use crate::encode::encode::{decode, encode};
-/// Defined in [Verifiable Encryption using Halo2][Section 2.4. Real Application Process].
 use ff::Field;
 use pasta_curves::pallas;
 

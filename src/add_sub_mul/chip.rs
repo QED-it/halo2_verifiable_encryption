@@ -13,7 +13,7 @@ use rand::rngs::OsRng;
 
 /// Define instructions that we would like to use with our chip AddSubMulChip
 pub(crate) trait AddSubMulInstructions:
-    AddInstructions + SubInstructions + MulInstructions
+AddInstructions + SubInstructions + MulInstructions
 {
     /// Variable representing a number.
     type Num;
@@ -550,7 +550,7 @@ pub fn run_add_sub_example() {
         OsRng,
         &mut transcript,
     )
-    .unwrap();
+        .unwrap();
     let proof = transcript.finalize();
     println!("Proof length: {:?}", proof.len());
 

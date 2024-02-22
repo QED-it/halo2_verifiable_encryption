@@ -21,7 +21,7 @@
 /// - public generator `G`;
 
 
-use crate::add_sub_mul::add_sub_mul::{
+use crate::add_sub_mul::chip::{
     AddInstructions, AddSubMulChip, AddSubMulConfig, AddSubMulInstructions, MulInstructions,
     SubInstructions,
 };

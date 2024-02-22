@@ -42,7 +42,7 @@ use pasta_curves::{pallas, vesta};
 use rand;
 use rand::rngs::OsRng;
 
-use crate::add_sub_mul::add_sub_mul::{
+use crate::add_sub_mul::chip::{
     AddInstructions, AddSubMulChip, AddSubMulConfig, AddSubMulInstructions, MulInstructions,
     SubInstructions,
 };

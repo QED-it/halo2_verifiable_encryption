@@ -7,7 +7,7 @@
 /// Prove:
 /// (1) Encode(m; r_encode) = p_m, that is,
 /// (1.1) p_m.x = r_encode + m
-/// (1.2) p_m.x^3 + 5 = p_m.y^2
+/// (1.2) p_m.x^3 + 5 = p_m.y^2 (redundant check, if p_m is not on the curve, the point operations will fail)
 /// (2) C = ElGamal.Enc(pk, p_m)
 /// (2.1) ct_1 = [r_enc]G, G is the generator of E
 /// (2.2) ct_2 = p_m +[r_enc]pk_elgamal
@@ -24,15 +24,12 @@
 /// - public generator `G`;
 
 use crate::constants::fixed_bases::VerifiableEncryptionFixedBases;
-use crate::constants::sinsemilla::{
-    VerifiableEncryptionCommitDomain, VerifiableEncryptionHashDomain,
-};
+
 use ff::Field;
 use group::prime::PrimeCurveAffine;
 use group::Curve;
 use halo2_gadgets::ecc::chip::{EccChip, EccConfig};
 use halo2_gadgets::ecc::{NonIdentityPoint, ScalarVar};
-use halo2_gadgets::sinsemilla::chip::{SinsemillaChip, SinsemillaConfig};
 use halo2_proofs::{
     circuit::{Chip, Layouter, SimpleFloorPlanner, Value},
     plonk::{Circuit, Column, ConstraintSystem, Error, Instance as InstanceColumn},
@@ -43,7 +40,7 @@ use rand;
 use rand::rngs::OsRng;
 
 use crate::add_sub_mul::chip::{
-    AddInstructions, AddSubMulChip, AddSubMulConfig, AddSubMulInstructions, MulInstructions,
+    AddInstructions, AddSubMulChip, AddSubMulConfig, AddSubMulInstructions,
     SubInstructions,
 };
 
@@ -67,11 +64,6 @@ pub struct Config {
     instance: Column<InstanceColumn>,
     ecc_config: EccConfig<VerifiableEncryptionFixedBases>,
     add_sub_mul_config: AddSubMulConfig,
-    sinsemilla_config: SinsemillaConfig<
-        VerifiableEncryptionHashDomain,
-        VerifiableEncryptionCommitDomain,
-        VerifiableEncryptionFixedBases,
-    >,
 }
 
 #[derive(Default, Clone)]
@@ -108,12 +100,7 @@ impl Circuit<pallas::Base> for MyCircuit {
         let table_idx = meta.lookup_table_column();
         let table_range_check_tag = meta.lookup_table_column();
 
-        let lookup = (
-            table_idx,
-            meta.lookup_table_column(),
-            meta.lookup_table_column(),
-            table_range_check_tag,
-        );
+
 
         // Shared advice column for loading advice
         let advice = [advices[8], advices[9]];
@@ -147,14 +134,7 @@ impl Circuit<pallas::Base> for MyCircuit {
         let range_check =
             LookupRangeCheckConfig::configure(meta, advices[9], table_idx, table_range_check_tag);
 
-        let sinsemilla_config = SinsemillaChip::configure(
-            meta,
-            advices[..5].try_into().unwrap(),
-            advices[6],
-            lagrange_coeffs[0],
-            lookup,
-            range_check,
-        );
+
 
         // Configuration for curve point operations.
         // This uses 10 advice columns and spans the whole circuit.
@@ -169,7 +149,6 @@ impl Circuit<pallas::Base> for MyCircuit {
             instance,
             ecc_config,
             add_sub_mul_config,
-            sinsemilla_config,
         }
     }
 
@@ -183,8 +162,8 @@ impl Circuit<pallas::Base> for MyCircuit {
         // Construct the ECC chip.
         let ecc_chip = EccChip::construct(config.ecc_config.clone());
 
-        // Load the Sinsemilla generator lookup table used by the whole circuit.
-        SinsemillaChip::load(config.sinsemilla_config.clone(), &mut layouter)?;
+        // Load 10-bit lookup table.
+        config.ecc_config.lookup_config.load(&mut layouter)?;
 
         let column = ecc_chip.config().advices[0];
 
@@ -223,30 +202,6 @@ impl Circuit<pallas::Base> for MyCircuit {
         // check if res = 0
         add_sub_mul_chip.check_result(layouter.namespace(|| "check res"), res, 0)?;
 
-        // (1.2) p_m.x^3 + 5 = p_m.y^2
-        let x2 = add_sub_mul_chip.mul(
-            layouter.namespace(|| "x*x"),
-            p_m.inner().x().clone(),
-            p_m.inner().x().clone(),
-        )?;
-        let x3 =
-            add_sub_mul_chip.mul(layouter.namespace(|| "x*x*x"), p_m.inner().x().clone(), x2)?;
-
-        let five = add_sub_mul_chip
-            .load_constant(layouter.namespace(|| "load 5"), pallas::Base::from(5))?;
-
-        let left = add_sub_mul_chip.add(layouter.namespace(|| "x*x*x + 5"), x3, five)?;
-
-        let right = add_sub_mul_chip.mul(
-            layouter.namespace(|| "y*y"),
-            p_m.inner().y().clone(),
-            p_m.inner().y().clone(),
-        )?;
-
-        let res = add_sub_mul_chip.sub(layouter.namespace(|| "x*x*x + 5 - y*y"), left, right)?;
-
-        // check if x*x*x + 5 - y*y = 0
-        add_sub_mul_chip.check_result(layouter.namespace(|| "check res"), res, 0)?;
 
         // (2) C = ElGamal.Enc(pk, p_m)
         // (2.1) ct_1 = [r_enc]G, G is the generator of E
@@ -582,6 +537,70 @@ mod tests {
         let strategy = SingleVerifier::new(&params);
         let mut tampered_transcript: Blake2bRead<&[u8], vesta::Affine, Challenge255<vesta::Affine>> = Blake2bRead::init(&proof[..]);
         let verify = plonk::verify_proof(&params, &vk, strategy, &tampered_instance, &mut tampered_transcript);
+        // The verification should fail, demonstrating the negative test case
+        assert!(verify.is_err(), "Expected verification to fail due to tampered input, but it succeeded.");
+    }
+
+    #[test]
+    fn negative_witness_test() {
+        let mut rng = OsRng;
+
+        // Elgamal keygen
+        let elgamal_keypair = ElGamalKeypair::new();
+
+        // Setup phase: generate parameters for the circuit.
+        let params = Params::new(K);
+
+        // generate a random dsa private key
+        // it will be encoded to a point on ECC, and be an input to elgamal encryption
+        let dsa_private_key = pallas::Base::random(&mut rng);
+
+        // Step 1. create a circuit
+        let circuit = vec![create_circuit(dsa_private_key, elgamal_keypair.clone())];
+
+        // Step 2. arrange the public instance.
+        let instance = vec![MyInstance {
+            ct: circuit[0].ct.clone(),
+            elgamal_public_key: circuit[0].elgamal_public_key.clone(),
+            dsa_public_key: circuit[0].dsa_public_key.clone(),
+        }];
+
+        // Instance transformation
+        let instance: Vec<_> = instance.iter().map(|i| i.to_halo2_instance()).collect();
+        let instance: Vec<Vec<_>> = instance
+            .iter()
+            .map(|i| i.iter().map(|c| &c[..]).collect())
+            .collect();
+        let instance: Vec<_> = instance.iter().map(|i| &i[..]).collect();
+
+        // Step 3, the negative part: Introduce a modification in the witness to simulate inconsistency
+        // For example, tamper with the DSA private key or any other critical part that will invalidate the proof
+        // Let's assume `tampered_dsa_private_key` is a different DSA private key
+        let tampered_dsa_private_key = pallas::Base::random(&mut rng);
+        let tampered_circuit = vec![create_circuit(tampered_dsa_private_key, elgamal_keypair.clone())];
+
+        // Step 4. generate the verification key vk and proving key pk from the params and tampered_circuit.
+        let vk = plonk::keygen_vk(&params, &tampered_circuit[0]).unwrap();
+        let pk = plonk::keygen_pk(&params, vk.clone(), &tampered_circuit[0]).unwrap();
+
+        // Step 5. Proving phase: create a proof with public instance and tampered_witness.
+        // The proof generation will need an internal transcript for Fiat-Shamir transformation.
+        let mut transcript = Blake2bWrite::<_, vesta::Affine, _>::init(vec![]);
+        plonk::create_proof(
+            &params,
+            &pk.clone(),
+            &tampered_circuit,
+            &instance,
+            &mut rng,
+            &mut transcript,
+        )
+            .unwrap();
+        let proof = transcript.finalize();
+
+        // Step 6. Verification phase: verify the proof against the public instance.
+        let strategy = SingleVerifier::new(&params);
+        let mut tampered_transcript: Blake2bRead<&[u8], vesta::Affine, Challenge255<vesta::Affine>> = Blake2bRead::init(&proof[..]);
+        let verify = plonk::verify_proof(&params, &vk, strategy, &instance, &mut tampered_transcript);
         // The verification should fail, demonstrating the negative test case
         assert!(verify.is_err(), "Expected verification to fail due to tampered input, but it succeeded.");
     }

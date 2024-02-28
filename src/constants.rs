@@ -1,7 +1,6 @@
 //! Constants used in the Verifiable Encryption
 
 pub(crate) mod fixed_bases;
-pub(crate) mod sinsemilla;
 
 /// $\ell^\mathsf{Verifiable Encryption}_\mathsf{scalar}$
 pub(crate) const L_VERIFIABLE_ENCRYPTION_SCALAR: usize = 255;

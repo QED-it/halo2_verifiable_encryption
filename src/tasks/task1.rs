@@ -6,7 +6,7 @@
 /// Prove:
 /// (1) Encode(m; r_encode) = p_m, that is,
 /// (1.1) p_m.x = r_encode + m
-/// (1.2) p_m.x^3 + 5 = p_m.y^2
+/// (1.2) p_m.x^3 + 5 = p_m.y^2 (redundant check, if p_m is not on the curve, the point operations will fail)
 /// (2) C = ElGamal.Enc(pk, p_m)
 /// (2.1) ct_1 = [r_enc]G, G is the generator of E
 /// (2.2) ct_2 = p_m +[r_enc]pk_elgamal
@@ -22,20 +22,16 @@
 
 
 use crate::add_sub_mul::chip::{
-    AddInstructions, AddSubMulChip, AddSubMulConfig, AddSubMulInstructions, MulInstructions,
+    AddInstructions, AddSubMulChip, AddSubMulConfig, AddSubMulInstructions,
     SubInstructions,
 };
 use crate::constants::fixed_bases::VerifiableEncryptionFixedBases;
-use crate::constants::sinsemilla::{
-    VerifiableEncryptionCommitDomain, VerifiableEncryptionHashDomain,
-};
 use crate::elgamal::extended_elgamal::DataInTransmit;
 use ff::Field;
 use group::prime::PrimeCurveAffine;
 use group::Curve;
 use halo2_gadgets::ecc::chip::{EccChip, EccConfig};
 use halo2_gadgets::ecc::{NonIdentityPoint, ScalarVar};
-use halo2_gadgets::sinsemilla::chip::{SinsemillaChip, SinsemillaConfig};
 use halo2_gadgets::utilities::lookup_range_check::LookupRangeCheckConfig;
 use halo2_gadgets::utilities::UtilitiesInstructions;
 use halo2_proofs::{
@@ -62,11 +58,6 @@ pub struct Config {
     instance: Column<InstanceColumn>,
     ecc_config: EccConfig<VerifiableEncryptionFixedBases>,
     add_sub_mul_config: AddSubMulConfig,
-    sinsemilla_config: SinsemillaConfig<
-        VerifiableEncryptionHashDomain,
-        VerifiableEncryptionCommitDomain,
-        VerifiableEncryptionFixedBases,
-    >,
 }
 
 #[derive(Default)]
@@ -101,13 +92,6 @@ impl Circuit<pallas::Base> for MyCircuit {
         let table_idx = meta.lookup_table_column();
         let table_range_check_tag = meta.lookup_table_column();
 
-        let lookup = (
-            table_idx,
-            meta.lookup_table_column(),
-            meta.lookup_table_column(),
-            table_range_check_tag,
-        );
-
         // Instance column used for public inputs
         let instance = meta.instance_column();
         meta.enable_equality(instance);
@@ -140,14 +124,7 @@ impl Circuit<pallas::Base> for MyCircuit {
         let range_check =
             LookupRangeCheckConfig::configure(meta, advices[9], table_idx, table_range_check_tag);
 
-        let sinsemilla_config = SinsemillaChip::configure(
-            meta,
-            advices[..5].try_into().unwrap(),
-            advices[6],
-            lagrange_coeffs[0],
-            lookup,
-            range_check,
-        );
+
         // Configuration for curve point operations.
         // This uses 10 advice columns and spans the whole circuit.
         let ecc_config = EccChip::<VerifiableEncryptionFixedBases>::configure(
@@ -161,7 +138,6 @@ impl Circuit<pallas::Base> for MyCircuit {
             instance,
             ecc_config,
             add_sub_mul_config,
-            sinsemilla_config,
         }
     }
 
@@ -175,8 +151,8 @@ impl Circuit<pallas::Base> for MyCircuit {
         // Construct the ECC chip.
         let ecc_chip = EccChip::construct(config.ecc_config.clone());
 
-        // Load the Sinsemilla generator lookup table used by the whole circuit.
-        SinsemillaChip::load(config.sinsemilla_config.clone(), &mut layouter)?;
+        // Load 10-bit lookup table.
+        config.ecc_config.lookup_config.load(&mut layouter)?;
 
         let column = ecc_chip.config().advices[0];
 
@@ -213,32 +189,6 @@ impl Circuit<pallas::Base> for MyCircuit {
 
         // check if res = 0
         add_sub_mul_chip.check_result(layouter.namespace(|| "check res"), res, 0)?;
-
-        // (1.2) p_m.x^3 + 5 = p_m.y^2
-        let x2 = add_sub_mul_chip.mul(
-            layouter.namespace(|| "x*x"),
-            p_m.inner().x().clone(),
-            p_m.inner().x().clone(),
-        )?;
-        let x3 =
-            add_sub_mul_chip.mul(layouter.namespace(|| "x*x*x"), p_m.inner().x().clone(), x2)?;
-
-        let five = add_sub_mul_chip
-            .load_constant(layouter.namespace(|| "load 5"), pallas::Base::from(5))?;
-
-        let left = add_sub_mul_chip.add(layouter.namespace(|| "x*x*x + 5"), x3, five)?;
-
-        let right = add_sub_mul_chip.mul(
-            layouter.namespace(|| "y*y"),
-            p_m.inner().y().clone(),
-            p_m.inner().y().clone(),
-        )?;
-
-        let res = add_sub_mul_chip.sub(layouter.namespace(|| "x*x*x + 5 - y*y"), left, right)?;
-
-        // check if x*x*x + 5 - y*y = 0
-        add_sub_mul_chip.check_result(layouter.namespace(|| "check res"), res, 0)?;
-
 
         // (2) C = ElGamal.Enc(pk, p_m)
         // (2.1) ct_1 = [r_enc]generator

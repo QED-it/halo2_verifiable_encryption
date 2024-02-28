@@ -11,7 +11,7 @@
 /// (2) C = ElGamal.Enc(pk, p_m)
 /// (2.1) ct_1 = [r_enc]G, G is the generator of E
 /// (2.2) ct_2 = p_m +[r_enc]pk_elgamal
-/// (3) pk_dsa = [m]G
+/// (3) pk_dsa = [m]G (new constraint compared to task1)
 ///
 /// - secret input `m`;
 /// - secret input `p_m`;
@@ -23,60 +23,40 @@
 /// - public group element `dsa_public_key`
 /// - public generator `G`;
 
-use crate::constants::fixed_bases::VerifiableEncryptionFixedBases;
 
-use ff::Field;
+use ff::{Field, PrimeField};
 use group::prime::PrimeCurveAffine;
-use group::Curve;
-use halo2_gadgets::ecc::chip::{EccChip, EccConfig};
+use group::{Curve, Group};
+use halo2_gadgets::ecc::chip::{EccChip};
 use halo2_gadgets::ecc::{NonIdentityPoint, ScalarVar};
 use halo2_proofs::{
-    circuit::{Chip, Layouter, SimpleFloorPlanner, Value},
-    plonk::{Circuit, Column, ConstraintSystem, Error, Instance as InstanceColumn},
+    circuit::{Layouter, SimpleFloorPlanner, Value},
+    plonk::{Circuit, ConstraintSystem, Error},
 };
 use pasta_curves::arithmetic::CurveAffine;
 use pasta_curves::{pallas, vesta};
 use rand;
 use rand::rngs::OsRng;
-
 use crate::add_sub_mul::chip::{
-    AddInstructions, AddSubMulChip, AddSubMulConfig, AddSubMulInstructions,
-    SubInstructions,
+    AddSubMulChip, AddSubMulInstructions,
 };
+use crate::tasks::task1::{VeEncCircuit, VeConfig, VeEncInstance};
+use crate::elgamal::elgamal::ElGamalKeypair;
+use crate::tasks::task1;
 
-use crate::elgamal::extended_elgamal::DataInTransmit;
-use halo2_gadgets::utilities::lookup_range_check::LookupRangeCheckConfig;
-use halo2_gadgets::utilities::UtilitiesInstructions;
 const K: u32 = 11;
-const ZERO: usize = 0;
-const ELGAMAL_CT1_X: usize = 1;
-const ELGAMAL_CT1_Y: usize = 2;
-
-const ELGAMAL_CT2_X: usize = 3;
-const ELGAMAL_CT2_Y: usize = 4;
-const ELGAMAL_PK_X: usize = 5;
-const ELGAMAL_PK_Y: usize = 6;
 const DSA_PK_X: usize = 7;
 const DSA_PK_Y: usize = 8;
 
-#[derive(Clone, Debug)]
-pub struct Config {
-    instance: Column<InstanceColumn>,
-    ecc_config: EccConfig<VerifiableEncryptionFixedBases>,
-    add_sub_mul_config: AddSubMulConfig,
-}
 
 #[derive(Default, Clone)]
-struct MyCircuit {
-    ct: DataInTransmit,
-    elgamal_public_key: pallas::Point,
+struct VeCircuit {
+    ve_enc_circuit: VeEncCircuit,
     dsa_public_key: pallas::Point,
-    m: Value<pallas::Base>,
-    p_m: Value<pallas::Point>,
-    r_enc: Value<pallas::Base>,
 }
-impl Circuit<pallas::Base> for MyCircuit {
-    type Config = Config;
+
+impl Circuit<pallas::Base> for VeCircuit {
+    type Config = VeConfig;
 
     type FloorPlanner = SimpleFloorPlanner;
 
@@ -85,71 +65,7 @@ impl Circuit<pallas::Base> for MyCircuit {
     }
 
     fn configure(meta: &mut ConstraintSystem<pallas::Base>) -> Self::Config {
-        let advices = [
-            meta.advice_column(),
-            meta.advice_column(),
-            meta.advice_column(),
-            meta.advice_column(),
-            meta.advice_column(),
-            meta.advice_column(),
-            meta.advice_column(),
-            meta.advice_column(),
-            meta.advice_column(),
-            meta.advice_column(),
-        ];
-        let table_idx = meta.lookup_table_column();
-        let table_range_check_tag = meta.lookup_table_column();
-
-
-
-        // Shared advice column for loading advice
-        let advice = [advices[8], advices[9]];
-
-        // Instance column used for public inputs
-        let instance = meta.instance_column();
-        meta.enable_equality(instance);
-
-        // Permutation over all advice columns.
-        for advice in advices.iter() {
-            meta.enable_equality(*advice);
-        }
-
-        let lagrange_coeffs = [
-            meta.fixed_column(),
-            meta.fixed_column(),
-            meta.fixed_column(),
-            meta.fixed_column(),
-            meta.fixed_column(),
-            meta.fixed_column(),
-            meta.fixed_column(),
-            meta.fixed_column(),
-        ];
-
-        // Shared fixed column for loading constants
-        let constant = lagrange_coeffs[0];
-        meta.enable_constant(constant);
-
-        let add_sub_mul_config = AddSubMulChip::configure(meta, advice, instance, constant);
-
-        let range_check =
-            LookupRangeCheckConfig::configure(meta, advices[9], table_idx, table_range_check_tag);
-
-
-
-        // Configuration for curve point operations.
-        // This uses 10 advice columns and spans the whole circuit.
-        let ecc_config = EccChip::<VerifiableEncryptionFixedBases>::configure(
-            meta,
-            advices,
-            lagrange_coeffs,
-            range_check,
-        );
-
-        Config {
-            instance,
-            ecc_config,
-            add_sub_mul_config,
-        }
+        VeEncCircuit::configure(meta)
     }
 
     fn synthesize(
@@ -157,63 +73,12 @@ impl Circuit<pallas::Base> for MyCircuit {
         config: Self::Config,
         mut layouter: impl Layouter<pallas::Base>,
     ) -> Result<(), Error> {
-        // Construct the add, sub, mul chip.
-        let add_sub_mul_chip = AddSubMulChip::new(config.add_sub_mul_config.clone());
-        // Construct the ECC chip.
         let ecc_chip = EccChip::construct(config.ecc_config.clone());
-
-        // Load 10-bit lookup table.
-        config.ecc_config.lookup_config.load(&mut layouter)?;
-
-        let column = ecc_chip.config().advices[0];
-
-        // (1) Encode(m; r_encode) = p_m
-        // (1.1) p_m.x = r_encode + m
-
-        // witness message point p_m
-        let p_m = NonIdentityPoint::new(
-            ecc_chip.clone(),
-            layouter.namespace(|| "load p_m"),
-            self.p_m.as_ref().map(|p_m| p_m.to_affine()),
-        )?;
-
-        // load randomness r_encode
-        let r_encode = add_sub_mul_chip.load_private(
-            layouter.namespace(|| "load r_encode"),
-            Value::known(self.ct.r_encode),
-        )?;
+        let add_sub_mul_chip = AddSubMulChip::new(config.add_sub_mul_config.clone());
 
         // load dsa_private_key = message
         let m =
-            add_sub_mul_chip.load_private(layouter.namespace(|| "load message"), self.m)?;
-
-        // compute res = m + r_encode - p_m.x
-        let exp_m = add_sub_mul_chip.add(
-            layouter.namespace(|| "m + r_encode"),
-            m.clone(),
-            r_encode,
-        )?;
-        let res = add_sub_mul_chip.sub(
-            layouter.namespace(|| "m + r_encode - p_m.x"),
-            exp_m,
-            p_m.inner().x(),
-        )?;
-
-        // check if res = 0
-        add_sub_mul_chip.check_result(layouter.namespace(|| "check res"), res, 0)?;
-
-
-        // (2) C = ElGamal.Enc(pk, p_m)
-        // (2.1) ct_1 = [r_enc]G, G is the generator of E
-
-        // r_enc
-        let assigned_r_enc =
-            ecc_chip.load_private(layouter.namespace(|| "load r_enc"), column, self.r_enc)?;
-        let r_enc = ScalarVar::from_base(
-            ecc_chip.clone(),
-            layouter.namespace(|| "r_enc"),
-            &assigned_r_enc,
-        )?;
+            add_sub_mul_chip.load_private(layouter.namespace(|| "load message"), self.ve_enc_circuit.m)?;
 
         // generator
         let generator = NonIdentityPoint::new(
@@ -221,71 +86,6 @@ impl Circuit<pallas::Base> for MyCircuit {
             layouter.namespace(|| "load generator"),
             Value::known(pallas::Affine::generator()),
         )?;
-
-        // compute [r_enc]generator
-        let (ct1_expected, _) =
-            { generator.mul(layouter.namespace(|| "[r_enc]generator"), r_enc)? };
-
-        // Constrain ct1_expected to equal public input ct1
-        layouter.constrain_instance(
-            ct1_expected.inner().x().cell(),
-            config.instance,
-            ELGAMAL_CT1_X,
-        )?;
-        layouter.constrain_instance(
-            ct1_expected.inner().y().cell(),
-            config.instance,
-            ELGAMAL_CT1_Y,
-        )?;
-
-        // (2.2) ct_2 = p_m +[r_enc]pk_elgamal
-
-        // r_enc
-        let r_enc = ScalarVar::from_base(
-            ecc_chip.clone(),
-            layouter.namespace(|| "r_enc"),
-            &assigned_r_enc,
-        )?;
-
-        // elgamal_public_key
-        let elgamal_public_key = NonIdentityPoint::new(
-            ecc_chip.clone(),
-            layouter.namespace(|| "load elgamal_public_key"),
-            Value::known(self.elgamal_public_key.to_affine()),
-        )?;
-
-        // Constrain elgamal_public_key to equal public input pk
-        layouter.constrain_instance(
-            elgamal_public_key.inner().x().cell(),
-            config.instance,
-            ELGAMAL_PK_X,
-        )?;
-        layouter.constrain_instance(
-            elgamal_public_key.inner().y().cell(),
-            config.instance,
-            ELGAMAL_PK_Y,
-        )?;
-
-        // Compute [r_enc]elgamal_public_key
-        let (r_mul_pk, _) =
-            { elgamal_public_key.mul(layouter.namespace(|| "[r_enc]elgamal_public_key"), r_enc)? };
-
-        // Compute ct_2_expected = [r_enc]elgamal_public_key + p_m
-        let ct_2_expected =
-            r_mul_pk.add(layouter.namespace(|| "[r_enc]elgamal_public_key+p_m"), &p_m)?;
-
-        // Constrain ct_2_expected to equal public input ct_2
-        layouter.constrain_instance(
-            ct_2_expected.inner().x().cell(),
-            config.instance,
-            ELGAMAL_CT2_X,
-        )?;
-        layouter.constrain_instance(
-            ct_2_expected.inner().y().cell(),
-            config.instance,
-            ELGAMAL_CT2_Y,
-        )?;
-
         // (3) dsa_public_key = [m]generator
         // convert message to scalar, it is dsa_private_key
         let m_scalar = ScalarVar::from_base(
@@ -314,41 +114,33 @@ impl Circuit<pallas::Base> for MyCircuit {
             DSA_PK_Y,
         )?;
 
-        Ok(())
+        // check for correction encryption
+        // Constraints (1) and (2)
+        let ve_enc_circuit = self.ve_enc_circuit.clone();
+        ve_enc_circuit.synthesize(
+            config.clone(),
+            layouter,
+        )
+
     }
 }
 
 /// Public inputs
 #[derive(Clone, Debug)]
-pub struct MyInstance {
-    ct: DataInTransmit,
-    elgamal_public_key: pallas::Point,
+pub struct VeInstance {
+    ve_enc_instance: VeEncInstance,
     dsa_public_key: pallas::Point,
 }
 
-impl MyInstance {
+impl VeInstance {
     fn to_halo2_instance(&self) -> [[vesta::Scalar; 9]; 1] {
         let mut instance = [vesta::Scalar::random(OsRng); 9];
-        instance[ZERO] = vesta::Scalar::zero();
 
-        instance[ELGAMAL_CT1_X] = *self.ct.ct.c1.to_affine().coordinates().unwrap().x();
-        instance[ELGAMAL_CT1_Y] = *self.ct.ct.c1.to_affine().coordinates().unwrap().y();
-
-        instance[ELGAMAL_CT2_X] = *self.ct.ct.c2.to_affine().coordinates().unwrap().x();
-        instance[ELGAMAL_CT2_Y] = *self.ct.ct.c2.to_affine().coordinates().unwrap().y();
-
-        instance[ELGAMAL_PK_X] = *self
-            .elgamal_public_key
-            .to_affine()
-            .coordinates()
-            .unwrap()
-            .x();
-        instance[ELGAMAL_PK_Y] = *self
-            .elgamal_public_key
-            .to_affine()
-            .coordinates()
-            .unwrap()
-            .y();
+        let ve_enc_instance = self.ve_enc_instance.clone();
+        let ve_enc_instance = ve_enc_instance.to_halo2_instance();
+        for i in 0..7 {
+            instance[i] = ve_enc_instance[0][i];
+        }
 
         instance[DSA_PK_X] = *self.dsa_public_key.to_affine().coordinates().unwrap().x();
         instance[DSA_PK_Y] = *self.dsa_public_key.to_affine().coordinates().unwrap().y();
@@ -356,51 +148,35 @@ impl MyInstance {
         [instance]
     }
 }
+fn create_circuit(message: pallas::Base, elgamal_keypair: ElGamalKeypair) -> VeCircuit {
+    let ve_enc_circuit = task1::create_circuit(message,elgamal_keypair);
 
+    // map base to scalar
+    let dsa_private_key = pallas::Scalar::from_repr(message.to_repr()).unwrap();
+
+    // Calculate the dsa public key [dsa_private_key]G
+    let dsa_public_key = pallas::Point::generator() * dsa_private_key;
+
+    VeCircuit {
+        ve_enc_circuit: ve_enc_circuit,
+        dsa_public_key: dsa_public_key,
+    }
+}
 #[cfg(test)]
 mod tests {
-    use super::{MyCircuit, MyInstance, K};
+    use super::{create_circuit, VeInstance, K};
     use crate::elgamal::elgamal::ElGamalKeypair;
-    use crate::elgamal::extended_elgamal::{extended_elgamal_decrypt, extended_elgamal_encrypt};
-    use ff::{Field, PrimeField};
+    use ff::{Field};
     use group::Group;
     use halo2_proofs::plonk::SingleVerifier;
     use halo2_proofs::poly::commitment::Params;
     use halo2_proofs::transcript::{Blake2bRead, Blake2bWrite, Challenge255};
-    use halo2_proofs::{circuit::Value, plonk};
+    use halo2_proofs::{plonk};
     use pasta_curves::{pallas, vesta};
     use rand::rngs::OsRng;
+    use crate::tasks::task1::{VeEncInstance};
 
-    fn create_circuit(message: pallas::Base, elgamal_keypair: ElGamalKeypair) -> MyCircuit {
-        // map base to scalar
-        let dsa_private_key = pallas::Scalar::from_repr(message.to_repr()).unwrap();
 
-        // Calculate the dsa public key [dsa_private_key]G
-        let dsa_public_key = pallas::Point::generator() * dsa_private_key;
-
-        // Elgamal encryption, encrypt message to ciphertext, the underlying message point is p_m
-        // p_m.x = m + ciphertext.r
-        let (data_in_transmit, elgamal_secret) =
-            extended_elgamal_encrypt(&elgamal_keypair.public_key, message);
-        let decrypted_message =
-            extended_elgamal_decrypt(&elgamal_keypair.private_key, data_in_transmit.clone())
-                .expect("Decryption failed");
-
-        // convert r_enc to base value
-        let r_enc = pallas::Base::from_repr(elgamal_secret.r_enc.to_repr()).unwrap();
-
-        // Verify decryption
-        assert_eq!(message, decrypted_message);
-
-        MyCircuit {
-            ct: data_in_transmit,
-            elgamal_public_key: elgamal_keypair.public_key,
-            dsa_public_key: dsa_public_key,
-            m: Value::known(message),
-            p_m: Value::known(elgamal_secret.p_m),
-            r_enc: Value::known(r_enc),
-        }
-    }
     #[test]
     fn round_trip() {
         let mut rng = OsRng;
@@ -419,9 +195,12 @@ mod tests {
         let circuit = vec![create_circuit(dsa_private_key, elgamal_keypair.clone())];
 
         // Step 2. arrange the public instance.
-        let instance = vec![MyInstance {
-            ct: circuit[0].ct.clone(),
-            elgamal_public_key: circuit[0].elgamal_public_key.clone(),
+        let ve_enc_instance = VeEncInstance{
+            data_in_transmit: circuit[0].ve_enc_circuit.data_in_transmit.clone(),
+            elgamal_public_key: circuit[0].ve_enc_circuit.elgamal_public_key.clone(),
+        };
+        let instance = vec![VeInstance {
+            ve_enc_instance: ve_enc_instance,
             dsa_public_key: circuit[0].dsa_public_key.clone(),
         }];
 
@@ -487,9 +266,12 @@ mod tests {
         let circuit = vec![create_circuit(dsa_private_key, elgamal_keypair.clone())];
 
         // Step 2. arrange the public instance.
-        let instance = vec![MyInstance {
-            ct: circuit[0].ct.clone(),
-            elgamal_public_key: circuit[0].elgamal_public_key.clone(),
+        let ve_enc_instance = VeEncInstance{
+            data_in_transmit: circuit[0].ve_enc_circuit.data_in_transmit.clone(),
+            elgamal_public_key: circuit[0].ve_enc_circuit.elgamal_public_key.clone(),
+        };
+        let instance = vec![VeInstance {
+            ve_enc_instance: ve_enc_instance.clone(),
             dsa_public_key: circuit[0].dsa_public_key.clone(),
         }];
 
@@ -523,10 +305,9 @@ mod tests {
         // For example, tamper with the DSA public key or any other critical part that will invalidate the proof
         // Let's assume `tampered_dsa_public_key` is a public key from a different DSA private key
         let tampered_dsa_public_key = pallas::Point::random(&mut rng); // This should ideally be a different key
-        let tampered_instance = vec![MyInstance {
-            ct: circuit[0].ct.clone(),
-            elgamal_public_key: circuit[0].elgamal_public_key.clone(),
-            dsa_public_key: tampered_dsa_public_key, // Tampered key
+        let tampered_instance = vec![VeInstance {
+            ve_enc_instance: ve_enc_instance,
+            dsa_public_key: tampered_dsa_public_key,
         }];
         let tampered_instance: Vec<_> = tampered_instance.iter().map(|i| i.to_halo2_instance()).collect();
         let tampered_instance: Vec<Vec<_>> = tampered_instance.iter().map(|i| i.iter().map(|c| &c[..]).collect()).collect();
@@ -559,9 +340,12 @@ mod tests {
         let circuit = vec![create_circuit(dsa_private_key, elgamal_keypair.clone())];
 
         // Step 2. arrange the public instance.
-        let instance = vec![MyInstance {
-            ct: circuit[0].ct.clone(),
-            elgamal_public_key: circuit[0].elgamal_public_key.clone(),
+        let ve_enc_instance = VeEncInstance{
+            data_in_transmit: circuit[0].ve_enc_circuit.data_in_transmit.clone(),
+            elgamal_public_key: circuit[0].ve_enc_circuit.elgamal_public_key.clone(),
+        };
+        let instance = vec![VeInstance {
+            ve_enc_instance: ve_enc_instance,
             dsa_public_key: circuit[0].dsa_public_key.clone(),
         }];
 

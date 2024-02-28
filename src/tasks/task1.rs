@@ -26,8 +26,8 @@ use crate::add_sub_mul::chip::{
     SubInstructions,
 };
 use crate::constants::fixed_bases::VerifiableEncryptionFixedBases;
-use crate::elgamal::extended_elgamal::DataInTransmit;
-use ff::Field;
+use crate::elgamal::extended_elgamal::{DataInTransmit, extended_elgamal_decrypt, extended_elgamal_encrypt};
+use ff::{Field, PrimeField};
 use group::prime::PrimeCurveAffine;
 use group::Curve;
 use halo2_gadgets::ecc::chip::{EccChip, EccConfig};
@@ -41,6 +41,7 @@ use halo2_proofs::{
 use pasta_curves::arithmetic::CurveAffine;
 use pasta_curves::{pallas, vesta};
 use rand::rngs::OsRng;
+use crate::elgamal::elgamal::ElGamalKeypair;
 
 const K: u32 = 11;
 
@@ -53,23 +54,23 @@ const ELGAMAL_CT2_Y: usize = 4;
 const ELGAMAL_PK_X: usize = 5;
 const ELGAMAL_PK_Y: usize = 6;
 
-#[derive(Clone)]
-pub struct Config {
-    instance: Column<InstanceColumn>,
-    ecc_config: EccConfig<VerifiableEncryptionFixedBases>,
-    add_sub_mul_config: AddSubMulConfig,
+#[derive(Clone, Debug)]
+pub struct VeConfig {
+    pub(crate) instance: Column<InstanceColumn>,
+    pub(crate) ecc_config: EccConfig<VerifiableEncryptionFixedBases>,
+    pub(crate) add_sub_mul_config: AddSubMulConfig,
 }
 
-#[derive(Default)]
-struct MyCircuit {
-    ct: DataInTransmit,
-    elgamal_public_key: pallas::Point,
-    m: Value<pallas::Base>,
-    p_m: Value<pallas::Point>,
-    r_enc: Value<pallas::Base>,
+#[derive(Default,Clone)]
+pub struct VeEncCircuit {
+    pub(crate) data_in_transmit: DataInTransmit,
+    pub(crate) elgamal_public_key: pallas::Point,
+    pub(crate) m: Value<pallas::Base>,
+    pub(crate) p_m: Value<pallas::Point>,
+    pub(crate) r_enc: Value<pallas::Base>,
 }
-impl Circuit<pallas::Base> for MyCircuit {
-    type Config = Config;
+impl Circuit<pallas::Base> for VeEncCircuit {
+    type Config = VeConfig;
     type FloorPlanner = SimpleFloorPlanner;
 
     fn without_witnesses(&self) -> Self {
@@ -77,6 +78,7 @@ impl Circuit<pallas::Base> for MyCircuit {
     }
 
     fn configure(meta: &mut ConstraintSystem<pallas::Base>) -> Self::Config {
+
         let advices = [
             meta.advice_column(),
             meta.advice_column(),
@@ -134,7 +136,7 @@ impl Circuit<pallas::Base> for MyCircuit {
             range_check,
         );
 
-        Config {
+        VeConfig {
             instance,
             ecc_config,
             add_sub_mul_config,
@@ -168,7 +170,7 @@ impl Circuit<pallas::Base> for MyCircuit {
         // load randomness r_encode
         let r_encode = add_sub_mul_chip.load_private(
             layouter.namespace(|| "load r_encode"),
-            Value::known(self.ct.r_encode),
+            Value::known(self.data_in_transmit.r_encode),
         )?;
 
         // load dsa_private_key = message
@@ -279,21 +281,21 @@ impl Circuit<pallas::Base> for MyCircuit {
 
 /// Public inputs
 #[derive(Clone, Debug)]
-pub struct MyInstance {
-    ct: DataInTransmit,
-    elgamal_public_key: pallas::Point,
+pub struct VeEncInstance {
+    pub(crate) data_in_transmit: DataInTransmit,
+    pub(crate) elgamal_public_key: pallas::Point,
 }
 
-impl MyInstance {
-    fn to_halo2_instance(&self) -> [[vesta::Scalar; 7]; 1] {
+impl VeEncInstance {
+    pub(crate) fn to_halo2_instance(&self) -> [[vesta::Scalar; 7]; 1] {
         let mut instance = [vesta::Scalar::random(OsRng); 7];
         instance[ZERO] = vesta::Scalar::zero();
 
-        instance[ELGAMAL_CT1_X] = *self.ct.ct.c1.to_affine().coordinates().unwrap().x();
-        instance[ELGAMAL_CT1_Y] = *self.ct.ct.c1.to_affine().coordinates().unwrap().y();
+        instance[ELGAMAL_CT1_X] = *self.data_in_transmit.ct.c1.to_affine().coordinates().unwrap().x();
+        instance[ELGAMAL_CT1_Y] = *self.data_in_transmit.ct.c1.to_affine().coordinates().unwrap().y();
 
-        instance[ELGAMAL_CT2_X] = *self.ct.ct.c2.to_affine().coordinates().unwrap().x();
-        instance[ELGAMAL_CT2_Y] = *self.ct.ct.c2.to_affine().coordinates().unwrap().y();
+        instance[ELGAMAL_CT2_X] = *self.data_in_transmit.ct.c2.to_affine().coordinates().unwrap().x();
+        instance[ELGAMAL_CT2_Y] = *self.data_in_transmit.ct.c2.to_affine().coordinates().unwrap().y();
 
         instance[ELGAMAL_PK_X] = *self
             .elgamal_public_key
@@ -312,44 +314,42 @@ impl MyInstance {
     }
 }
 
+pub(crate) fn create_circuit(message: pallas::Base, keypair: ElGamalKeypair) -> VeEncCircuit {
+    // Elgamal encryption
+    let (data_in_transmit, elgamal_secret) =
+        extended_elgamal_encrypt(&keypair.public_key, message);
+    let decrypted_message =
+        extended_elgamal_decrypt(&keypair.private_key, data_in_transmit.clone())
+            .expect("Decryption failed");
+    // Verify decryption
+    assert_eq!(message, decrypted_message);
+
+    // convert r_enc to base value
+    let r_enc = pallas::Base::from_repr(elgamal_secret.r_enc.to_repr()).unwrap();
+
+    VeEncCircuit {
+        data_in_transmit: data_in_transmit,
+        elgamal_public_key: keypair.public_key,
+        m: Value::known(message),
+        p_m: Value::known(elgamal_secret.p_m),
+        r_enc: Value::known(r_enc),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MyCircuit, MyInstance, K};
+    use super::{create_circuit, VeEncInstance, K};
     use crate::elgamal::elgamal::ElGamalKeypair;
-
-    use crate::elgamal::extended_elgamal::{extended_elgamal_decrypt, extended_elgamal_encrypt};
     use crate::encode::utf8::{
         convert_string_to_u8_array, convert_u8_array_to_u64_array, split_message_into_blocks,
     };
-    use ff::PrimeField;
     use halo2_proofs::plonk::SingleVerifier;
     use halo2_proofs::poly::commitment::Params;
     use halo2_proofs::transcript::{Blake2bRead, Blake2bWrite, Challenge255};
-    use halo2_proofs::{circuit::Value, plonk};
+    use halo2_proofs::{plonk};
     use pasta_curves::{pallas, vesta};
     use rand::rngs::OsRng;
 
-    fn create_circuit(message: pallas::Base, keypair: ElGamalKeypair) -> MyCircuit {
-        // Elgamal encryption
-        let (data_in_transmit, elgamal_secret) =
-            extended_elgamal_encrypt(&keypair.public_key, message);
-        let decrypted_message =
-            extended_elgamal_decrypt(&keypair.private_key, data_in_transmit.clone())
-                .expect("Decryption failed");
-        // Verify decryption
-        assert_eq!(message, decrypted_message);
-
-        // convert r_enc to base value
-        let r_enc = pallas::Base::from_repr(elgamal_secret.r_enc.to_repr()).unwrap();
-
-        MyCircuit {
-            ct: data_in_transmit,
-            elgamal_public_key: keypair.public_key,
-            m: Value::known(message),
-            p_m: Value::known(elgamal_secret.p_m),
-            r_enc: Value::known(r_enc),
-        }
-    }
 
     #[test]
     fn round_trip() {
@@ -379,8 +379,8 @@ mod tests {
             let circuit = vec![create_circuit(m, keypair.clone())];
 
             // Step 2. arrange the public instance.
-            let instance = vec![MyInstance {
-                ct: circuit[0].ct.clone(),
+            let instance = vec![VeEncInstance {
+                data_in_transmit: circuit[0].data_in_transmit.clone(),
                 elgamal_public_key: circuit[0].elgamal_public_key.clone(),
             }];
 

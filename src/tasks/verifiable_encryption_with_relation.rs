@@ -40,9 +40,9 @@ use rand::rngs::OsRng;
 use crate::add_sub_mul::chip::{
     AddSubMulChip, AddSubMulInstructions,
 };
-use crate::tasks::task1::{VeEncCircuit, VeConfig, VeEncInstance};
+use crate::tasks::verifiable_encryption::{VeEncCircuit, VeConfig, VeEncInstance};
 use crate::elgamal::elgamal::ElGamalKeypair;
-use crate::tasks::task1;
+use crate::tasks::verifiable_encryption;
 
 const K: u32 = 11;
 const DSA_PK_X: usize = 7;
@@ -149,7 +149,7 @@ impl VeInstance {
     }
 }
 fn create_circuit(message: pallas::Base, elgamal_keypair: ElGamalKeypair) -> VeCircuit {
-    let ve_enc_circuit = task1::create_circuit(message,elgamal_keypair);
+    let ve_enc_circuit = verifiable_encryption::create_circuit(message,elgamal_keypair);
 
     // map base to scalar
     let dsa_private_key = pallas::Scalar::from_repr(message.to_repr()).unwrap();
@@ -174,7 +174,7 @@ mod tests {
     use halo2_proofs::{plonk};
     use pasta_curves::{pallas, vesta};
     use rand::rngs::OsRng;
-    use crate::tasks::task1::{VeEncInstance};
+    use crate::tasks::verifiable_encryption::{VeEncInstance};
 
 
     #[test]

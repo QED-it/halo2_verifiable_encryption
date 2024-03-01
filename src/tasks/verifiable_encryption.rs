@@ -279,6 +279,7 @@ impl Circuit<pallas::Base> for VeEncCircuit {
     }
 }
 
+
 /// Public inputs
 #[derive(Clone, Debug)]
 pub struct VeEncInstance {

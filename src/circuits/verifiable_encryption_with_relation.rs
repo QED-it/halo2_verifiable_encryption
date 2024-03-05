@@ -40,9 +40,9 @@ use rand::rngs::OsRng;
 use crate::add_sub_mul::chip::{
     AddSubMulChip, AddSubMulInstructions,
 };
-use crate::tasks::verifiable_encryption::{VeEncCircuit, VeConfig, VeEncInstance};
+use crate::circuits::verifiable_encryption::{VeEncCircuit, VeConfig, VeEncInstance};
 use crate::elgamal::elgamal::ElGamalKeypair;
-use crate::tasks::verifiable_encryption;
+use crate::circuits::verifiable_encryption;
 
 const K: u32 = 11;
 const DSA_PK_X: usize = 7;
@@ -174,7 +174,7 @@ mod tests {
     use halo2_proofs::{plonk};
     use pasta_curves::{pallas, vesta};
     use rand::rngs::OsRng;
-    use crate::tasks::verifiable_encryption::{VeEncInstance};
+    use crate::circuits::verifiable_encryption::{VeEncInstance};
 
 
     #[test]

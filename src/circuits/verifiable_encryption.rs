@@ -371,8 +371,9 @@ mod tests {
         convert_string_to_u8_array, convert_u8_array_to_u64_array, split_message_into_blocks,
     };
     use halo2_proofs::poly::commitment::Params;
-    use halo2_proofs::transcript::{ Blake2bWrite};
+    use halo2_proofs::transcript::{Blake2bRead, Blake2bWrite, Challenge255};
     use halo2_proofs::{plonk};
+    use halo2_proofs::plonk::SingleVerifier;
     use pasta_curves::{pallas, vesta};
     use rand::rngs::OsRng;
 
@@ -434,7 +435,7 @@ mod tests {
                 &mut transcript,
             )
                 .unwrap();
-            /*
+
             let proof = transcript.finalize();
 
             // Step 5. Verification phase: verify the proof against the public instance.
@@ -453,7 +454,7 @@ mod tests {
 
             assert_eq!(proof.len(), expected_proof_size);
 
-             */
+
         }
     }
 }

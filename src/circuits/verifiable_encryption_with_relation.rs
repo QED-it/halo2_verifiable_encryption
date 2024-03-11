@@ -29,20 +29,22 @@ use group::prime::PrimeCurveAffine;
 use group::{Curve, Group};
 use halo2_gadgets::ecc::chip::{EccChip};
 use halo2_gadgets::ecc::{NonIdentityPoint, ScalarVar};
+use halo2_gadgets::utilities::UtilitiesInstructions;
 use halo2_proofs::{
     circuit::{Layouter, SimpleFloorPlanner, Value},
     plonk::{Circuit, ConstraintSystem, Error},
 };
+use halo2_proofs::circuit::{AssignedCell, Chip};
 use pasta_curves::arithmetic::CurveAffine;
-use pasta_curves::{pallas, vesta};
+use pasta_curves::{Fp, pallas, vesta};
+use pasta_curves::pallas::{Affine, Base};
 use rand;
 use rand::rngs::OsRng;
-use crate::add_sub_mul::chip::{
-    AddSubMulChip, AddSubMulInstructions,
-};
-use crate::circuits::verifiable_encryption::{VeEncCircuit, VeConfig, VeEncInstance};
+use crate::add_sub_mul::chip::{AddInstructions, AddSubMulChip, AddSubMulInstructions, SubInstructions};
+use crate::circuits::verifiable_encryption::{VeEncCircuit, VeConfig, VeEncInstance, check_encryption};
 use crate::elgamal::elgamal::ElGamalKeypair;
 use crate::circuits::verifiable_encryption;
+use crate::constants::fixed_bases::VerifiableEncryptionFixedBases;
 
 const K: u32 = 11;
 const DSA_PK_X: usize = 7;
@@ -76,54 +78,113 @@ impl Circuit<pallas::Base> for VeCircuit {
         let ecc_chip = EccChip::construct(config.ecc_config.clone());
         let add_sub_mul_chip = AddSubMulChip::new(config.add_sub_mul_config.clone());
 
+        // Load 10-bit lookup table.
+        config.ecc_config.lookup_config.load(&mut layouter)?;
+
+        let column = ecc_chip.config().advices[0];
+
+        // witness message point p_m
+        let p_m = NonIdentityPoint::new(
+            ecc_chip.clone(),
+            layouter.namespace(|| "load p_m"),
+            self.ve_enc_circuit.p_m.as_ref().map(|p_m| p_m.to_affine()),
+        )?;
+        // load randomness r_encode
+        let r_encode = add_sub_mul_chip.load_private(
+            layouter.namespace(|| "load r_encode"),
+            Value::known(self.ve_enc_circuit.data_in_transmit.r_encode),
+        )?;
+
         // load dsa_private_key = message
-        let m =
+        let message =
             add_sub_mul_chip.load_private(layouter.namespace(|| "load message"), self.ve_enc_circuit.m)?;
 
-        // generator
-        let generator = NonIdentityPoint::new(
+        // load r_enc
+        let assigned_r_enc =
+            ecc_chip.load_private(layouter.namespace(|| "load r_enc"), column, self.ve_enc_circuit.r_enc)?;
+
+        // elgamal_public_key
+        let elgamal_public_key = NonIdentityPoint::new(
             ecc_chip.clone(),
-            layouter.namespace(|| "load generator"),
-            Value::known(pallas::Affine::generator()),
-        )?;
-        // (3) dsa_public_key = [m]generator
-        // convert message to scalar, it is dsa_private_key
-        let m_scalar = ScalarVar::from_base(
-            ecc_chip.clone(),
-            layouter.namespace(|| "m to scalar"),
-            &m,
+            layouter.namespace(|| "load elgamal_public_key"),
+            Value::known(self.ve_enc_circuit.elgamal_public_key.to_affine()),
         )?;
 
-        // compute dsa_pk_expected = [message_scalar]generator
-        let (dsa_pk_expected, _) = {
-            generator.mul(
-                layouter.namespace(|| "[m_scalar]generator"),
-                m_scalar,
-            )?
-        };
-
-        // Constrain dsa_pk_expected to equal public input dsa_pk
-        layouter.constrain_instance(
-            dsa_pk_expected.inner().x().cell(),
-            config.instance,
-            DSA_PK_X,
-        )?;
-        layouter.constrain_instance(
-            dsa_pk_expected.inner().y().cell(),
-            config.instance,
-            DSA_PK_Y,
-        )?;
-
-        // check for correction encryption
-        // Constraints (1) and (2)
-        let ve_enc_circuit = self.ve_enc_circuit.clone();
-        ve_enc_circuit.synthesize(
-            config.clone(),
+        check_encryption_and_relation(
+            config,
             layouter,
+            ecc_chip,
+            add_sub_mul_chip,
+            p_m,
+            r_encode,
+            message,
+            assigned_r_enc,
+            elgamal_public_key,
         )
-
     }
 }
+
+pub(crate) fn check_encryption_and_relation(
+    config: VeConfig,
+    mut layouter: impl Layouter<pallas::Base>,
+    ecc_chip:  EccChip<VerifiableEncryptionFixedBases>,
+    add_sub_mul_chip: AddSubMulChip,
+    p_m: NonIdentityPoint<Affine, EccChip<VerifiableEncryptionFixedBases>>,
+    r_encode: AssignedCell<Fp, Fp>,
+    message: AssignedCell<Fp, Fp>,
+    assigned_r_enc:  AssignedCell<Base, Base>,
+    elgamal_public_key: NonIdentityPoint<Affine, EccChip<VerifiableEncryptionFixedBases>>,
+) -> Result<(), Error>
+{
+    // check relation
+    // generator
+    let generator = NonIdentityPoint::new(
+        ecc_chip.clone(),
+        layouter.namespace(|| "load generator"),
+        Value::known(pallas::Affine::generator()),
+    )?;
+    // (3) dsa_public_key = [m]generator
+    // convert message to scalar, it is dsa_private_key
+    let m_scalar = ScalarVar::from_base(
+        ecc_chip.clone(),
+        layouter.namespace(|| "m to scalar"),
+        &message,
+    )?;
+
+    // compute dsa_pk_expected = [message_scalar]generator
+    let (dsa_pk_expected, _) = {
+        generator.mul(
+            layouter.namespace(|| "[m_scalar]generator"),
+            m_scalar,
+        )?
+    };
+
+    // Constrain dsa_pk_expected to equal public input dsa_pk
+    layouter.constrain_instance(
+        dsa_pk_expected.inner().x().cell(),
+        config.instance,
+        DSA_PK_X,
+    )?;
+    layouter.constrain_instance(
+        dsa_pk_expected.inner().y().cell(),
+        config.instance,
+        DSA_PK_Y,
+    )?;
+
+    // check encryption
+    crate::circuits::verifiable_encryption::check_encryption(
+        config,
+        layouter,
+        ecc_chip,
+        add_sub_mul_chip,
+        p_m,
+        r_encode,
+        message,
+        assigned_r_enc,
+        elgamal_public_key,
+    )
+}
+
 
 /// Public inputs
 #[derive(Clone, Debug)]
@@ -175,7 +236,6 @@ mod tests {
     use pasta_curves::{pallas, vesta};
     use rand::rngs::OsRng;
     use crate::circuits::verifiable_encryption::{VeEncInstance};
-
 
     #[test]
     fn round_trip() {

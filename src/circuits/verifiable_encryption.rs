@@ -32,16 +32,18 @@ use group::prime::PrimeCurveAffine;
 use group::Curve;
 use halo2_gadgets::ecc::chip::{EccChip, EccConfig};
 use halo2_gadgets::ecc::{NonIdentityPoint, ScalarVar};
-use halo2_gadgets::utilities::lookup_range_check::LookupRangeCheckConfig;
 use halo2_gadgets::utilities::UtilitiesInstructions;
 use halo2_proofs::{
     circuit::{Chip, Layouter, SimpleFloorPlanner, Value},
     plonk::{Circuit, Column, ConstraintSystem, Error, Instance as InstanceColumn},
 };
 use pasta_curves::arithmetic::CurveAffine;
-use pasta_curves::{pallas, vesta};
+use pasta_curves::{Fp, pallas, vesta};
 use rand::rngs::OsRng;
 use crate::elgamal::elgamal::ElGamalKeypair;
+use halo2_gadgets::utilities::lookup_range_check::LookupRangeCheckConfig;
+use halo2_proofs::circuit::AssignedCell;
+use pasta_curves::pallas::{Affine, Base};
 
 const K: u32 = 11;
 
@@ -158,9 +160,6 @@ impl Circuit<pallas::Base> for VeEncCircuit {
 
         let column = ecc_chip.config().advices[0];
 
-        // (1) Encode(m; r_encode) = p_m, that is,
-        // (1.1) p_m.x = r_encode + m
-
         // witness message point p_m
         let p_m = NonIdentityPoint::new(
             ecc_chip.clone(),
@@ -177,63 +176,9 @@ impl Circuit<pallas::Base> for VeEncCircuit {
         let message =
             add_sub_mul_chip.load_private(layouter.namespace(|| "load message"), self.m)?;
 
-        // compute res = m + r_encode - p_m.x
-        let exp_m = add_sub_mul_chip.add(
-            layouter.namespace(|| "m + r_encode"),
-            message.clone(),
-            r_encode,
-        )?;
-        let res = add_sub_mul_chip.sub(
-            layouter.namespace(|| "m + r_encode - p_m.x"),
-            exp_m,
-            p_m.inner().x(),
-        )?;
-
-        // check if res = 0
-        add_sub_mul_chip.check_result(layouter.namespace(|| "check res"), res, 0)?;
-
-        // (2) C = ElGamal.Enc(pk, p_m)
-        // (2.1) ct_1 = [r_enc]generator
-        // r_enc
+        // load r_enc
         let assigned_r_enc =
             ecc_chip.load_private(layouter.namespace(|| "load r_enc"), column, self.r_enc)?;
-        let r_enc = ScalarVar::from_base(
-            ecc_chip.clone(),
-            layouter.namespace(|| "r_enc"),
-            &assigned_r_enc,
-        )?;
-
-        // generator
-        let generator = NonIdentityPoint::new(
-            ecc_chip.clone(),
-            layouter.namespace(|| "load generator"),
-            Value::known(pallas::Affine::generator()),
-        )?;
-
-        // compute [r_enc]generator
-        let (ct1_expected, _) =
-            { generator.mul(layouter.namespace(|| "[r_enc]generator"), r_enc)? };
-
-        // Constrain ct1_expected to equal public input ct1
-        layouter.constrain_instance(
-            ct1_expected.inner().x().cell(),
-            config.instance,
-            ELGAMAL_CT1_X,
-        )?;
-        layouter.constrain_instance(
-            ct1_expected.inner().y().cell(),
-            config.instance,
-            ELGAMAL_CT1_Y,
-        )?;
-
-        // (2.2) ct_2 = p_m +[r_enc]pk
-
-        // r_enc
-        let r_enc = ScalarVar::from_base(
-            ecc_chip.clone(),
-            layouter.namespace(|| "r_enc"),
-            &assigned_r_enc,
-        )?;
 
         // elgamal_public_key
         let elgamal_public_key = NonIdentityPoint::new(
@@ -242,43 +187,124 @@ impl Circuit<pallas::Base> for VeEncCircuit {
             Value::known(self.elgamal_public_key.to_affine()),
         )?;
 
-        // Constrain elgamal_public_key to equal public input pk
-        layouter.constrain_instance(
-            elgamal_public_key.inner().x().cell(),
-            config.instance,
-            ELGAMAL_PK_X,
-        )?;
-        layouter.constrain_instance(
-            elgamal_public_key.inner().y().cell(),
-            config.instance,
-            ELGAMAL_PK_Y,
-        )?;
 
-        // Compute [r_enc]elgamal_public_key
-        let (r_mul_pk, _) =
-            { elgamal_public_key.mul(layouter.namespace(|| "[r_enc]elgamal_public_key"), r_enc)? };
-
-        // Compute ct_2_expected = [r_enc]elgamal_public_key + p_m
-        let ct_2_expected =
-            r_mul_pk.add(layouter.namespace(|| "[r_enc]elgamal_public_key+p_m"), &p_m)?;
-
-        // Constrain ct_2_expected to equal public input ct_2
-        layouter.constrain_instance(
-            ct_2_expected.inner().x().cell(),
-            config.instance,
-            ELGAMAL_CT2_X,
-        )?;
-        layouter.constrain_instance(
-            ct_2_expected.inner().y().cell(),
-            config.instance,
-            ELGAMAL_CT2_Y,
-        )?;
-
-
-        Ok(())
+        check_encryption(
+            config,
+            layouter,
+            ecc_chip,
+            add_sub_mul_chip,
+            p_m,
+            r_encode,
+            message,
+            assigned_r_enc,
+            elgamal_public_key,
+        )
     }
 }
 
+pub(crate) fn check_encryption(
+    config: VeConfig,
+    mut layouter: impl Layouter<pallas::Base>,
+    ecc_chip:  EccChip<VerifiableEncryptionFixedBases>,
+    add_sub_mul_chip: AddSubMulChip,
+    p_m: NonIdentityPoint<Affine, EccChip<VerifiableEncryptionFixedBases>>,
+    r_encode: AssignedCell<Fp, Fp>,
+    message: AssignedCell<Fp, Fp>,
+    assigned_r_enc:  AssignedCell<Base, Base>,
+    elgamal_public_key: NonIdentityPoint<Affine, EccChip<VerifiableEncryptionFixedBases>>,
+) -> Result<(), Error>
+{
+    // (1) Encode(m; r_encode) = p_m, that is,
+    // (1.1) p_m.x = r_encode + m
+
+    // compute res = m + r_encode - p_m.x
+    let exp_m = add_sub_mul_chip.add(
+        layouter.namespace(|| "m + r_encode"),
+        message.clone(),
+        r_encode,
+    )?;
+    let res = add_sub_mul_chip.sub(
+        layouter.namespace(|| "m + r_encode - p_m.x"),
+        exp_m,
+        p_m.inner().x(),
+    )?;
+
+    // check if res = 0
+    add_sub_mul_chip.check_result(layouter.namespace(|| "check res"), res, 0)?;
+
+    // (2) C = ElGamal.Enc(pk, p_m)
+    // (2.1) ct_1 = [r_enc]generator
+    // r_enc
+    let r_enc = ScalarVar::from_base(
+        ecc_chip.clone(),
+        layouter.namespace(|| "r_enc"),
+        &assigned_r_enc,
+    )?;
+
+    // generator
+    let generator = NonIdentityPoint::new(
+        ecc_chip.clone(),
+        layouter.namespace(|| "load generator"),
+        Value::known(pallas::Affine::generator()),
+    )?;
+
+    // compute [r_enc]generator
+    let (ct1_expected, _) =
+        { generator.mul(layouter.namespace(|| "[r_enc]generator"), r_enc)? };
+
+    // Constrain ct1_expected to equal public input ct1
+    layouter.constrain_instance(
+        ct1_expected.inner().x().cell(),
+        config.instance,
+        ELGAMAL_CT1_X,
+    )?;
+    layouter.constrain_instance(
+        ct1_expected.inner().y().cell(),
+        config.instance,
+        ELGAMAL_CT1_Y,
+    )?;
+
+    // (2.2) ct_2 = p_m +[r_enc]pk
+    // r_enc
+    let r_enc = ScalarVar::from_base(
+        ecc_chip.clone(),
+        layouter.namespace(|| "r_enc"),
+        &assigned_r_enc,
+    )?;
+
+    // Constrain elgamal_public_key to equal public input pk
+    layouter.constrain_instance(
+        elgamal_public_key.inner().x().cell(),
+        config.instance,
+        ELGAMAL_PK_X,
+    )?;
+    layouter.constrain_instance(
+        elgamal_public_key.inner().y().cell(),
+        config.instance,
+        ELGAMAL_PK_Y,
+    )?;
+
+    // Compute [r_enc]elgamal_public_key
+    let (r_mul_pk, _) =
+        { elgamal_public_key.mul(layouter.namespace(|| "[r_enc]elgamal_public_key"), r_enc)? };
+
+    // Compute ct_2_expected = [r_enc]elgamal_public_key + p_m
+    let ct_2_expected =
+        r_mul_pk.add(layouter.namespace(|| "[r_enc]elgamal_public_key+p_m"), &p_m)?;
+
+    // Constrain ct_2_expected to equal public input ct_2
+    layouter.constrain_instance(
+        ct_2_expected.inner().x().cell(),
+        config.instance,
+        ELGAMAL_CT2_X,
+    )?;
+    layouter.constrain_instance(
+        ct_2_expected.inner().y().cell(),
+        config.instance,
+        ELGAMAL_CT2_Y,
+    )?;
+    Ok(())
+}
 
 /// Public inputs
 #[derive(Clone, Debug)]

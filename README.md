@@ -25,18 +25,18 @@ encrypts to a cipehrtext C. Additionally, the message is a private key of a digi
 ### Verifiable encryption
 To run the round trip test:
 ```bash
-cargo test --package halo2_verifiable_encryption --lib tasks::verifiable_encryption::tests::round_trip
+cargo test --package halo2_verifiable_encryption --lib circuits::verifiable_encryption::tests::round_trip
 ```
 ### Verifiable encryption with relation
 To run the round trip test:
 ```bash
-cargo test --package halo2_verifiable_encryption --lib tasks::verifiable_encryption_with_relation::tests::round_trip
+cargo test --package halo2_verifiable_encryption --lib circuits::verifiable_encryption_with_relation::tests::round_trip
 ```
 To run the negative test with tampered public input:
 ```bash
-cargo test --package halo2_verifiable_encryption --lib tasks::verifiable_encryption_with_relation::tests::negative_test
+cargo test --package halo2_verifiable_encryption --lib circuits::verifiable_encryption_with_relation::tests::negative_test
 ```
 To run the negative test with tampered witness:
 ```bash
-cargo test --package halo2_verifiable_encryption --lib tasks::verifiable_encryption_with_relation::tests::negative_witness_test
+cargo test --package halo2_verifiable_encryption --lib circuits::verifiable_encryption_with_relation::tests::negative_witness_test
 ```

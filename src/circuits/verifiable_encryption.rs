@@ -365,6 +365,7 @@ pub(crate) fn create_circuit(message: pallas::Base, keypair: ElGamalKeypair) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
     use super::{create_circuit, VeEncInstance, K};
     use crate::elgamal::elgamal::ElGamalKeypair;
     use crate::encode::utf8::{
@@ -393,8 +394,15 @@ mod tests {
         // Elgamal keygen
         let keypair = ElGamalKeypair::new();
 
+        let start = Instant::now();
         // Setup phase: generate parameters for the circuit.
         let params = Params::new(K);
+
+        let duration = start.elapsed();
+
+        // Print the duration to see how long the function took.
+        println!("Time elapsed in my_function() is: {:?}", duration);
+
 
         // Create a circuit for each block
         for (_, block) in blocks.iter().enumerate() {
@@ -456,5 +464,6 @@ mod tests {
 
 
         }
+
     }
 }
